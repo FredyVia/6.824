@@ -1,10 +1,12 @@
 package mr
 
-import "fmt"
-import "log"
-import "net/rpc"
-import "hash/fnv"
-
+import (
+	"fmt"
+	"hash/fnv"
+	"log"
+	"net/rpc"
+	"time"
+)
 
 //
 // Map functions return a slice of KeyValue.
@@ -24,47 +26,83 @@ func ihash(key string) int {
 	return int(h.Sum32() & 0x7fffffff)
 }
 
-
 //
 // main/mrworker.go calls this function.
 //
-func Worker(mapf func(string, string) []KeyValue,
-	reducef func(string, []string) string) {
+func call_register() int {
+	args := RegisterArgs{}
+	reply := RegisterReply{}
 
-	// Your worker implementation here.
-
-	// uncomment to send the Example RPC to the coordinator.
-	// CallExample()
-
+	ok := call("Coordinator.register", &args, &reply)
+	if !ok {
+		fmt.Printf("register call failed!\n")
+	}
+	return reply.workerid
 }
 
-//
-// example function to show how to make an RPC call to the coordinator.
-//
-// the RPC argument and reply types are defined in rpc.go.
-//
-func CallExample() {
-
-	// declare an argument structure.
-	args := ExampleArgs{}
+func call_refresh(workerid int) {
+	args := RefreshArgs{}
 
 	// fill in the argument(s).
-	args.X = 99
+	args.workerid = workerid
 
 	// declare a reply structure.
-	reply := ExampleReply{}
 
 	// send the RPC request, wait for the reply.
 	// the "Coordinator.Example" tells the
 	// receiving server that we'd like to call
 	// the Example() method of struct Coordinator.
-	ok := call("Coordinator.Example", &args, &reply)
-	if ok {
-		// reply.Y should be 100.
-		fmt.Printf("reply.Y %v\n", reply.Y)
-	} else {
-		fmt.Printf("call failed!\n")
+	ok := call("Coordinator.online_refresh", &args, nil)
+	if !ok {
+		fmt.Printf("online refresh call failed!\n")
 	}
+}
+
+func Worker(mapf func(string, string) []KeyValue,
+	reducef func(string, []string) string) {
+	workerid := call_register()
+	// Your worker implementation here.
+	ticker := time.NewTicker(TIMEOUT)
+	stopChan := make(chan struct{}) // 创建用于发送停止信号的通道
+
+	go func() {
+		for {
+			select {
+			case <-ticker.C:
+				call_refresh(workerid)
+			case <-stopChan:
+				fmt.Println("Ticker stopped")
+				ticker.Stop() // 停止ticker
+				return        // 退出goroutine
+			}
+		}
+	}()
+	// uncomment to send the Example RPC to the coordinator.
+	// CallExample()
+	for {
+		args := GetWorkArgs{}
+		args.workerid = workerid
+		// declare a reply structure.
+		reply := GetWorkReply{}
+
+		ok := call("Coordinator.get_work", nil, &reply)
+		if !ok {
+			fmt.Printf("GetWork call failed!\n")
+			break
+		}
+
+		if reply.status == FINISHED {
+			break
+		} else if reply.status == WAITING {
+			time.Sleep(5000)
+			continue
+		}
+
+		mapf(reply.key)
+		reply.key
+	}
+	stopChan <- struct{}{} // 发送停止信号
+	fmt.Println("Stop signal sent")
 }
 
 //
